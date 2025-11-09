@@ -10,7 +10,7 @@
 
 ### 🧱 1. Склонируйте репозиторий
 ```bash
-git clone https://github.com/<твой_ник>/kvanet_linux_client.git
+git clone https://github.com/ConnectHere/kvanet_linux_client.git
 cd kvanet_linux_client
 ```
 
