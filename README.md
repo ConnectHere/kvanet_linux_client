@@ -1,1 +1,18 @@
-# kvanet_linux_client
+# 🛡️ Kvanet Linux Client
+
+Графический клиент для подключения к Kvanet VPN под Linux.
+
+---
+
+## 🚀 Установка и запуск
+
+```bash
+# Клонируем репозиторий
+git clone https://github.com/<твой_ник>/kvanet_linux_client.git
+cd kvanet_linux_client
+
+# Делаем скрипт исполняемым
+chmod +x run_vpn.sh
+
+# Запускаем клиент
+./run_vpn.sh
