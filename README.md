@@ -39,7 +39,7 @@ chmod +x run_vpn.sh
 ```bash
 cp kvanetvpn.desktop ~/.local/share/applications/
 ```
-P.S.: незабудь изменить 2 строчки под себя:
+P.S.: незабудь изменить 2 строчки в kvanetvpn.desktop под себя:
 
 ```bash
 Exec=/path/to/run_vpn.sh
