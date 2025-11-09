@@ -39,12 +39,10 @@ chmod +x run_vpn.sh
 ```bash
 cp kvanetvpn.desktop ~/.local/share/applications/
 ```
-P.S.: незабудь изменить 2 строчки в kvanetvpn.desktop под себя:
+P.S.: незабудь изменить строчку в kvanetvpn.desktop под себя:
 
 ```bash
-Exec=/path/to/run_vpn.sh
-
-Path=/path/to/kvanet_linux_client
+Exec=/path/to/kvanet_linux_client/run_vpn.sh
 ```
 
 После этого клиент появится в списке приложений как **"Kvanet VPN Client"** 🔐
