@@ -1,7 +1,7 @@
 [Desktop Entry]
 Version=1.0
 Type=Application
-Name=Kvanet VPN Client
+Name=Kvanet Client
 Comment=Linux GUI клиент для Kvanet VPN
 Exec=/path/to/kvanet_linux_client/run_vpn.sh
 Icon=network-vpn
