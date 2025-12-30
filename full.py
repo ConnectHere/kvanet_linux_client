@@ -5,44 +5,43 @@ import time
 import threading
 import subprocess
 import requests
-import json
-from tkinter import filedialog, messagebox, scrolledtext
 import sys
 import psutil
 import tempfile
+import json
+from pathlib import Path
+from tkinter import messagebox
 
-# Глобалки
+# ------------------ Глобальные переменные ------------------
 current_user_global = None
 current_password_global = None
+API_BASE_URL = "https://xn--80adkrr5a.xn--p1ai"
 
-# Устанавливаем тему и режим
+# Настройка темы приложения
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
-API_BASE_URL = "https://xn--80adkrr5a.xn--p1ai"
-
+# ------------------ VPN MANAGER ------------------
 class VPNManager:
-    """Класс для управления VPN соединениями"""
-
     def __init__(self):
         self.process = None
         self.is_connected = False
         self.log_callback = None
         self.status_callback = None
-        self.connection_timeout = 45
-        self.auth_file_path = None
-        self.current_user = None
-        self.current_password = None
-    
-    def set_log_callback(self, callback):
-        self.log_callback = callback
+        self.temp_ovpn_path = None
+        self.failed_attempts = 0
+        self.expected_ip = None
+        self.current_server = None
 
-    def set_status_callback(self, callback):
-        self.status_callback = callback
+    def set_log_callback(self, cb):
+        self.log_callback = cb
 
-    def log(self, message):
+    def set_status_callback(self, cb):
+        self.status_callback = cb
+
+    def log(self, msg):
         if self.log_callback:
-            self.log_callback(message)
+            self.log_callback(msg)
 
     def update_status(self, status, progress=None):
         if self.status_callback:
@@ -51,280 +50,162 @@ class VPNManager:
     def is_admin(self):
         try:
             return os.geteuid() == 0
-        except AttributeError:
-            # Windows не поддерживает os.geteuid()
+        except:
             return False
 
     def is_openvpn_installed(self):
-        try:
-            result = subprocess.run(['which', 'openvpn'], capture_output=True, text=True)
-            return result.returncode == 0
-        except:
-            return False
+        return subprocess.run(["which", "openvpn"], capture_output=True).returncode == 0
 
-    def get_openvpn_path(self):
-        try:
-            result = subprocess.run(['which', 'openvpn'], capture_output=True, text=True)
-            if result.returncode == 0:
-                return result.stdout.strip()
-            return '/usr/bin/openvpn'
-        except:
-            return '/usr/bin/openvpn'
+    def get_public_ip(self):
+        """Получение текущего публичного IP адреса"""
+        for url in ["https://api.ipify.org", "https://ident.me", "https://icanhazip.com"]:
+            try:
+                r = requests.get(url, timeout=3)
+                if r.status_code == 200:
+                    return r.text.strip()
+            except:
+                continue
+        return None
 
-    def install_openvpn(self):
-        try:
-            self.log("📥 Начинаем установку OpenVPN...")
-            self.update_status("Установка OpenVPN...", 0.3)
-
-            update_result = subprocess.run(
-                ['sudo', 'pacman', '-Sy'],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-            if update_result.returncode != 0:
-                self.log("❌ Ошибка обновления базы данных пакетов")
-                return False
-
-            self.update_status("Установка OpenVPN...", 0.6)
-
-            install_result = subprocess.run(
-                ['sudo', 'pacman', '-S', '--noconfirm', 'openvpn'],
-                capture_output=True,
-                text=True,
-                timeout=300
-            )
-
-            if install_result.returncode == 0:
-                self.log("✅ OpenVPN успешно установлен!")
-                self.update_status("OpenVPN установлен", 1.0)
-                time.sleep(2)
-                return True
-            else:
-                self.log(f"❌ Ошибка установки OpenVPN: {install_result.stderr}")
-                return False
-
-        except subprocess.TimeoutExpired:
-            self.log("❌ Таймаут при установке OpenVPN")
-            return False
-        except Exception as e:
-            self.log(f"❌ Ошибка при установке OpenVPN: {str(e)}")
-            return False
-
-    def run_as_admin(self):
-        try:
-            if os.geteuid() != 0:
-                os.execvp('sudo', ['sudo', sys.executable] + sys.argv)
-            return True
-        except Exception as e:
-            self.log(f"❌ Ошибка перезапуска с правами root: {str(e)}")
-            return False
-
-    def create_auth_file(self, username, password):
-        """Создаёт временный файл с логином и паролем для OpenVPN"""
-        auth_file = tempfile.NamedTemporaryFile(delete=False, mode='w', encoding='utf-8')
-        auth_file.write(f"{username}\n{password}\n")
-        auth_file.close()
-        self.auth_file_path = auth_file.name
-        return self.auth_file_path
-
-    def connect(self, ovpn_file_path):
-        if not os.path.exists(ovpn_file_path):
-            self.log(f"❌ Файл {ovpn_file_path} не найден")
-            return False
-        if not ovpn_file_path.endswith('.ovpn'):
-            self.log("❌ Файл должен иметь расширение .ovpn")
-            return False
-        if not self.is_openvpn_installed():
-            self.log("❌ OpenVPN не установлен")
-            return False
+    def connect(self, vpn_type, login, password):
+        """vpn_type: 'ru' - для подключения к РФ (из-за границы), 'world' - для выхода из РФ"""
         if not self.is_admin():
-            self.log("❌ Требуются права root")
+            self.log("Требуются права root")
             return False
-    
-        username = self.current_user['login'] if self.current_user else (
-            current_user_global['login'] if current_user_global else None
-        )
-        password = self.current_password if self.current_password else current_password_global
-    
-        if not username or not password:
-            self.log("❌ Нет данных для авторизации")
-            return False
-    
-        # Создаем временный auth-файл
-        self.create_auth_file(username, password)
-    
-        # Запускаем подключение в отдельном потоке
-        threading.Thread(
-            target=self.run_connection,
-            args=(ovpn_file_path, username, password)
-        ).start()
-    
-        return True
-    
 
+        # Устанавливаем ожидаемый IP в зависимости от сервера
+        if vpn_type == "ru":
+            self.expected_ip = "95.163.232.136"
+            server_name = "Россия"
+        else:  # world
+            self.expected_ip = "147.45.255.17"
+            server_name = "Нидерланды"
 
-    def run_connection(self, ovpn_file_path, username, password):
-        global current_user_global, current_password_global
+        self.current_server = server_name
+        self.log(f"Подключение к {server_name}...")
+
         try:
-            if username is None or password is None:
-                # Берем из глобальных переменных
-                if current_user_global is None or current_password_global is None:
-                    self.log("❌ Не указаны учетные данные")
-                    return False
-                username = current_user_global.get('login', '')
-                password = current_password_global
-            else:
-                # Обновляем глобальные переменные
-                current_user_global = {'login': username}
-                current_password_global = password            
-            self.log("🔍 Проверка файла конфигурации...")
-            self.update_status("Проверка файла...", 0.2)
-            time.sleep(1)
-    
-            log_dir = os.path.join(os.path.expanduser("~"), "KvanetVPN")
-            os.makedirs(log_dir, exist_ok=True)
-            log_file = os.path.join(log_dir, "openvpn.log")
-    
-            self.log("🚀 Запуск OpenVPN...")
-            self.update_status("Запуск OpenVPN...", 0.4)
-    
-            login = current_user_global.get('login', '')
-            password = current_password_global
-            
-            self.log(f"login: {login}; password:{password}")
+            r = requests.post(
+                f"{API_BASE_URL}/api/app/get-ovpn",
+                json={
+                    "login": login,
+                    "password": password,
+                    "type": vpn_type
+                },
+                timeout=10
+            )
+            data = r.json()
+        except Exception as e:
+            self.log(f"Ошибка API: {e}")
+            self.failed_attempts += 1
+            return False
+
+        if not data.get("success"):
+            error_msg = data.get("error", "Неизвестная ошибка")
+            self.log(f"Ошибка сервера: {error_msg}")
+            self.failed_attempts += 1
+            return False
+
+        ovpn_text = data["ovpn"]
+
+        # Сохраняем временный конфиг
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".ovpn")
+        tmp.write(ovpn_text.encode())
+        tmp.close()
+        self.temp_ovpn_path = tmp.name
+
+        threading.Thread(target=self._run_openvpn, args=(login, password, server_name), daemon=True).start()
+        return True
+
+    def _run_openvpn(self, login, password, server_name):
+        """Запуск OpenVPN с проверкой IP"""
+        try:
+            self.log(f"Запуск OpenVPN...")
+
+            cmd = f'echo -e "{login}\\n{password}" | openvpn --config {self.temp_ovpn_path} --auth-user-pass /dev/stdin --verb 1'
             self.process = subprocess.Popen(
-                f'echo -e "{login}\\n{password}" | sudo {self.get_openvpn_path()} --config {ovpn_file_path} --log {log_file} --verb 3 --auth-user-pass /dev/stdin',
+                cmd,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                universal_newlines=True,
+                text=True,
                 bufsize=1
             )
-            
-            connection_established = False
+
+            time.sleep(1)
+            if os.path.exists(self.temp_ovpn_path):
+                os.remove(self.temp_ovpn_path)
+
+            connected = False
             start_time = time.time()
-            timeout = 10  # таймаут подключения в секундах
-            
-            # --- Проверяем IP через несколько секунд после запуска ---
-            def delayed_ip_check():
-                try:
-                    time.sleep(8)  # подождём 8 секунд (время на установку соединения)
-                    if self.process and self.process.poll() is None:  # процесс жив
-                        current_ip = self.get_public_ip()
-                        if current_ip == "147.45.255.17":
-                            self.log(f"✅ Подключено! IP: {current_ip}")
-                            self.update_status("Подключено", 1.0)
-                            self.is_connected = True
-                        else:
-                            self.log(f"⚠️ IP пока не совпадает (текущий: {current_ip})")
-                except Exception as e:
-                    self.log(f"⚠️ Ошибка проверки IP после запуска: {e}")
 
-            threading.Thread(target=delayed_ip_check, daemon=True).start()
+            # Читаем вывод OpenVPN
+            for line in self.process.stdout:
+                line = line.strip()
 
-            # Читаем вывод в цикле
-            while True:
-                # Проверяем таймаут
-                if time.time() - start_time > timeout and not connection_established:
-                    self.log("❌ Таймаут подключения")
-                    self.update_status("Таймаут подключения", 0.0)
-                    self.process.terminate()
+                if "Initialization Sequence Completed" in line:
+                    # Подождать немного для установки соединения
+                    time.sleep(2)
+
+                    # Проверить IP
+                    current_ip = self.get_public_ip()
+
+                    if current_ip == self.expected_ip:
+                        self.is_connected = True
+                        connected = True
+                        self.failed_attempts = 0
+                        self.log(f"Успешно подключено к {server_name}")
+                        self.log(f"Ваш IP: {current_ip}")
+                    else:
+                        self.log(f"Подключено, но IP не соответствует ({current_ip})")
+                        self.log(f"Ожидался IP: {self.expected_ip}")
+                        self.failed_attempts += 1
+                        self.disconnect()
+
                     break
-    
-                # Проверяем статус процесса
-                if self.process.poll() is not None:
-                    self.log("❌ OpenVPN завершился неожиданно")
-                    self.update_status("Ошибка подключения", 0.0)
+
+                if "AUTH_FAILED" in line:
+                    self.log("Ошибка аутентификации")
+                    self.failed_attempts += 1
                     break
-    
-                # Читаем строку (неблокирующее чтение)
-                line = self.process.stdout.readline()
-                if not line:
-                    time.sleep(0.1)  # небольшая пауза если нет вывода
-                    continue
-    
-                cleaned_line = line.strip()
-                self.log(cleaned_line)
-    
-#                if 'Initialization Sequence Completed' in cleaned_line:
-#                    self.is_connected = True
-#                    connection_established = True
-#                    self.log("✅ Успешно подключено!")
-#                    self.update_status("Подключено", 1.0)
-#                    try:
-#                        public_ip = self.get_public_ip()
-#                        if public_ip:
-#                            self.log(f"🌐 Ваш IP: {public_ip}")
-#                        else:
-#                            self.log("⚠️ Не удалось определить IP")
-#                    except Exception as e:
-#                        self.log(f"⚠️ Ошибка проверки IP: {e}")
-#                    break
 
+                if "ERROR" in line and "tls" not in line.lower():
+                    self.log(f"{line[:80]}")
 
+                # Таймаут подключения
+                if time.time() - start_time > 30:
+                    self.log("Таймаут подключения")
+                    break
 
+            if not connected:
+                self.failed_attempts += 1
+                self.log("Не удалось подключиться")
 
-                
+                if self.failed_attempts >= 5:
+                    config_type = "ru" if self.current_server == "Россия" else "world"
+                    self.log(f"Слишком много неудачных попыток ({self.failed_attempts})")
+                    self.log(f"Пожалуйста, перегенерируйте конфигурационный файл ({config_type})")
+                    self.failed_attempts = 0
 
-
-                if 'ERROR' in cleaned_line or 'AUTH_FAILED' in cleaned_line:
-                    self.log(f"❌ Ошибка: {cleaned_line}")
-                    self.update_status("Ошибка подключения", 0.0)
+                if self.process:
                     self.process.terminate()
-                    #break
-    
-                # Обновляем прогресс если подключение устанавливается
-                elif 'Waiting for' in cleaned_line or 'Reconnecting' in cleaned_line:
-                    self.update_status("Установка соединения...", 0.6)
-                elif 'TCP/UDP' in cleaned_line:
-                    self.update_status("Настройка сети...", 0.8)
-    
+
         except Exception as e:
-            self.log(f"❌ Ошибка подключения: {str(e)}")
-            self.is_connected = False
-            self.update_status("Ошибка", 0.0)
-        finally:
-            # Убираем удаление auth_file_path так как мы не создаем файл
-            pass
-    
-    def get_public_ip(self):
-        try:
-            services = ['https://api.ipify.org', 'https://ident.me', 'https://checkip.amazonaws.com']
-            for service in services:
-                try:
-                    r = requests.get(service, timeout=10)
-                    if r.status_code == 200:
-                        return r.text.strip()
-                except:
-                    continue
-            return None
-        except:
-            return None
+            self.log(f"Ошибка: {e}")
+            self.failed_attempts += 1
 
     def disconnect(self):
-        self.update_status("Отключение...", 0.5)
-        self.log("🔌 Отключение VPN...")
-        if self.process and self.process.poll() is None:
-            try:
-                self.process.terminate()
-                try:
-                    self.process.wait(timeout=10)
-                    self.log("✅ Отключено")
-                    self.update_status("Не подключено", 0.0)
-                except subprocess.TimeoutExpired:
-                    self.process.kill()
-                    self.log("⚠️ Принудительное отключение")
-                    self.update_status("Не подключено", 0.0)
-            except Exception as e:
-                self.log(f"❌ Ошибка при отключении: {str(e)}")
+        """Отключение VPN соединения"""
+        self.log("Отключение VPN...")
+
+        # Принудительное завершение всех процессов OpenVPN
+        self.kill_all_openvpn()
+
         self.is_connected = False
         self.process = None
 
-    def get_status(self):
-        return self.is_connected
-
     def kill_all_openvpn(self):
+        """Принудительное завершение всех процессов OpenVPN"""
         try:
             killed = 0
             for proc in psutil.process_iter(['pid', 'name']):
@@ -335,642 +216,765 @@ class VPNManager:
                     except:
                         pass
             if killed > 0:
-                self.log(f"🔧 Завершено процессов OpenVPN: {killed}")
-            else:
-                self.log("🔧 Процессы OpenVPN не найдены")
+                self.log(f"Завершено процессов OpenVPN: {killed}")
         except Exception as e:
-            self.log(f"⚠️ Ошибка при завершении процессов: {e}")
+            self.log(f"Ошибка при завершении процессов: {e}")
 
-# ------------------ Приложение ------------------
+# ------------------ Анимированные титры ------------------
+class CreditsRollWindow(ctk.CTkToplevel):
+    def __init__(self, parent, theme="dark"):
+        """Показать видео титры"""
+        import subprocess
+        import os
 
+        BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+        video_file = os.path.join(BASE_DIR, "titry.mp4")
+
+        if os.path.exists(video_file):
+            try:
+                # Открываем видео в отдельном процессе
+                if sys.platform == "win32":
+                    os.startfile(video_file)
+                elif sys.platform == "darwin":
+                    subprocess.call(['open', video_file])
+                else:
+                    subprocess.call(['xdg-open', video_file])
+            except:
+                # Если не удалось открыть видео, показываем анимацию
+                self.show_fallback_animation()
+        else:
+            self.show_fallback_animation()
+
+    def start_animation(self):
+        """Показать видео титры"""
+        import subprocess
+        import os
+
+        video_file = "titry.mp4"
+
+        if os.path.exists(video_file):
+            try:
+                # Открываем видео в отдельном процессе
+                if sys.platform == "win32":
+                    os.startfile(video_file)
+                elif sys.platform == "darwin":
+                    subprocess.call(['open', video_file])
+                else:
+                    subprocess.call(['xdg-open', video_file])
+            except:
+                # Если не удалось открыть видео, показываем анимацию
+                self.show_fallback_animation()
+        else:
+            self.show_fallback_animation()
+
+
+
+# ------------------ ГЛАВНОЕ ПРИЛОЖЕНИЕ ------------------
 class App(ctk.CTk):
-    width = 1000
-    height = 700
-
     def __init__(self):
         super().__init__()
         self.title("Kvanet VPN Client")
-        self.geometry(f"{self.width}x{self.height}")
-        self.minsize(900, 650)
-        self.resizable(True, True)
+        self.geometry("500x700")
+        self.minsize(500, 700)
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        # Текущая тема
+        self.current_theme = "dark"
 
-        self.canvas = ctk.CTkCanvas(self, width=self.width, height=self.height, highlightthickness=0, bg="#141428")
-        self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.create_gradient()
+        # Инициализация VPN менеджера
+        self.vpn = VPNManager()
+        self.vpn.set_log_callback(self.add_log)
 
-        self.pixel_font = ctk.CTkFont(family="DejaVu Sans Mono", size=20, weight="bold")
-        self.text_font = ctk.CTkFont(family="DejaVu Sans", size=14)
-        self.small_font = ctk.CTkFont(family="DejaVu Sans", size=12)
-
-        self.vpn_manager = VPNManager()
-        self.vpn_manager.set_log_callback(self.add_log_message)
-        self.vpn_manager.set_status_callback(self.update_status)
-
-        self.current_ovpn_file = None
         self.current_user = None
+        self.current_password = None
+        self.is_authenticated = False
 
-        self.create_widgets()
-        self.check_openvpn_installation()
+        # Флаг подключения
+        self.is_connecting = False
+        self.dot_counter = 0
 
-    # ------------------ UI методы ------------------
+        # Переменная для выбора сервера
+        self.server_var = ctk.StringVar(value="world")  # По умолчанию Нидерланды
 
-    def create_widgets(self):
-        # Поле для выбора OVPN файла
-        self.file_entry = ctk.CTkEntry(self, width=400)
-        self.file_entry.place(x=50, y=50)
-        
-        browse_button = ctk.CTkButton(self, text="Обзор", command=self.on_browse_button_clicked)
-        browse_button.place(x=460, y=50)
-    
-        # Кнопка подключения
-        self.connect_button = ctk.CTkButton(self, text="Подключиться", command=self.on_connect_button_clicked)
-        self.connect_button.place(x=50, y=100)
-    
-        # Лог
-        self.log_text = scrolledtext.ScrolledText(self, width=80, height=20)
-        self.log_text.place(x=50, y=150)
-    
-        # Статус
-        self.status_label = ctk.CTkLabel(self, text="Статус: Не подключено")
-        self.status_label.place(x=50, y=500)
-    
-        # Прогресс бар
-        self.progress_bar = ctk.CTkProgressBar(self, width=400)
-        self.progress_bar.place(x=50, y=530)
-    
+        # Создаем изображения флагов
+        self.create_flag_images()
 
-    def create_gradient(self):
-        width, height = self.width, self.height
-        image = Image.new("RGB", (width, height))
-        draw = ImageDraw.Draw(image)
-        start_color = (20, 20, 40)
-        end_color = (100, 60, 150)
-        for y in range(height):
-            r = int(start_color[0] + (end_color[0]-start_color[0])*y/height)
-            g = int(start_color[1] + (end_color[1]-start_color[1])*y/height)
-            b = int(start_color[2] + (end_color[2]-start_color[2])*y/height)
-            draw.line((0,y,width,y), fill=(r,g,b))
-        self.gradient_image = ImageTk.PhotoImage(image)
-        self.canvas.create_image(0,0,image=self.gradient_image, anchor="nw")
-        self.canvas.bind("<Configure>", self.resize_gradient)
+        # Настройка цветовой схемы
+        self.setup_theme()
 
-    def resize_gradient(self, event):
-        width = event.width if event.width > 0 else self.width
-        height = event.height if event.height > 0 else self.height
-        image = Image.new("RGB", (width, height))
-        draw = ImageDraw.Draw(image)
-        start_color = (20, 20, 40)
-        end_color = (100, 60, 150)
-        for y in range(height):
-            r = int(start_color[0] + (end_color[0]-start_color[0])*y/height)
-            g = int(start_color[1] + (end_color[1]-start_color[1])*y/height)
-            b = int(start_color[2] + (end_color[2]-start_color[2])*y/height)
-            draw.line((0,y,width,y), fill=(r,g,b))
-        self.gradient_image = ImageTk.PhotoImage(image)
-        self.canvas.delete("all")
-        self.canvas.create_image(0,0,image=self.gradient_image, anchor="nw")
+        # Построение интерфейса
+        self.build_ui()
 
+        # Запуск проверки IP для обновления кнопки
+        self.start_ip_checker()
 
-    def create_widgets(self):
-        """Создание всех элементов интерфейса"""
-        # Фрейм для входа
-        self.sign_in_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="#2A2A3A")
-        self.sign_in_frame.grid_columnconfigure(0, weight=1)
+        # Показать окно входа
+        self.show_login_screen()
+        self.load_saved_credentials()
 
-        self.sign_in_label = ctk.CTkLabel(self.sign_in_frame, text="Вход", font=self.pixel_font, text_color="#28A745")
-        self.sign_in_label.grid(row=0, column=0, padx=30, pady=(15, 15))
+    def create_flag_images(self):
+        """Создание изображений флагов"""
+        # Флаг Нидерландов (красный-белый-синий горизонтальные полосы)
+        nl_flag = Image.new('RGB', (40, 25), color='white')
+        draw = ImageDraw.Draw(nl_flag)
+        # Красная полоса
+        draw.rectangle([0, 0, 40, 8], fill='#AE1C28')
+        # Белая полоса (уже белый фон)
+        draw.rectangle([0, 8, 40, 17], fill='white')
+        # Синяя полоса
+        draw.rectangle([0, 17, 40, 25], fill='#21468B')
+        self.nl_flag_image = ImageTk.PhotoImage(nl_flag)
 
-        self.username_entry = ctk.CTkEntry(self.sign_in_frame, width=250, placeholder_text="Логин", font=self.text_font,
-                                          fg_color="#3A3A50", border_color="#28A745", border_width=2)
-        self.username_entry.grid(row=1, column=0, padx=30, pady=(15, 15))
+        # Флаг России (белый-синий-красный горизонтальные полосы)
+        ru_flag = Image.new('RGB', (40, 25), color='white')
+        draw = ImageDraw.Draw(ru_flag)
+        # Белая полоса
+        draw.rectangle([0, 0, 40, 8], fill='white')
+        # Синяя полоса
+        draw.rectangle([0, 8, 40, 17], fill='#0C47B7')
+        # Красная полоса
+        draw.rectangle([0, 17, 40, 25], fill='#E4181C')
+        self.ru_flag_image = ImageTk.PhotoImage(ru_flag)
 
-        self.password_entry = ctk.CTkEntry(self.sign_in_frame, width=250, show="*", placeholder_text="Пароль", font=self.text_font,
-                                          fg_color="#3A3A50", border_color="#28A745", border_width=2)
-        self.password_entry.grid(row=2, column=0, padx=30, pady=(0, 15))
+    def setup_theme(self):
+        """Настройка цветовой схемы в зависимости от темы"""
+        if self.current_theme == "dark":
+            # ТЁМНАЯ ТЕМА (черный + фиолетовый)
+            self.bg_color = "#0A0A0F"
+            self.frame_bg = "#1A1A2E"
+            self.text_color = "#E0E0E0"
+            self.accent_color = "#BB86FC"
+            self.button_color = "#2D2D44"
+            self.hover_color = "#3D3D5C"
+            self.switch_text_color = "#E0E0E0"
+            ctk.set_appearance_mode("dark")
+        else:
+            # СВЕТЛАЯ ТЕМА
+            self.bg_color = "#F5F5F7"
+            self.frame_bg = "#FFFFFF"
+            self.text_color = "#000000"
+            self.accent_color = "#7B1FA2"
+            self.button_color = "#F0F0F5"
+            self.hover_color = "#E0E0E5"
+            self.switch_text_color = "#000000"
+            ctk.set_appearance_mode("light")
 
-        # Метка для ошибок входа
-        self.login_error_label = ctk.CTkLabel(self.sign_in_frame, text="", font=self.small_font, text_color="#FF4444")
-        self.login_error_label.grid(row=3, column=0, padx=30, pady=(5, 5))
+        self.configure(fg_color=self.bg_color)
 
-        self.sign_in_button = ctk.CTkButton(self.sign_in_frame, text="Войти", command=self.sign_in_event, width=250,
-                                           fg_color="#28A745", hover_color="#218838", text_color="#1E1E2F")
-        self.sign_in_button.grid(row=4, column=0, padx=30, pady=(15, 15))
+    def build_ui(self):
+        """Построение пользовательского интерфейса"""
 
-        self.sign_in_label_info = ctk.CTkLabel(self.sign_in_frame, text="Нет аккаунта? Регистрируйтесь на нашем сайте",
-                                             font=self.text_font, text_color="#FFFFFF")
-        self.sign_in_label_info.grid(row=5, column=0, padx=30, pady=(15, 15))
+        # ------------------ ЭКРАН ВХОДА ------------------
+        self.login_frame = ctk.CTkFrame(self, fg_color=self.frame_bg, corner_radius=15)
 
-        # Главный фрейм для VPN
-        self.main_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="#2A2A3A")
-        self.main_frame.grid_columnconfigure(0, weight=1)
-        self.main_frame.grid_columnconfigure(1, weight=1)
+        # Логотип
+        self.logo_label = ctk.CTkLabel(
+            self.login_frame,
+            text="Kvanet VPN",
+            font=("Arial", 32, "bold"),
+            text_color=self.accent_color
+        )
+        self.logo_label.pack(pady=(60, 40))
 
-        # Заголовок
-        self.main_label = ctk.CTkLabel(self.main_frame, text="Kvanet VPN Client", font=self.pixel_font, text_color="#28A745")
-        self.main_label.grid(row=0, column=0, columnspan=2, pady=(20, 10), sticky="n")
+        # Поля ввода
+        self.login_entry = ctk.CTkEntry(
+            self.login_frame,
+            placeholder_text="Логин",
+            width=300,
+            height=50,
+            fg_color=self.button_color,
+            border_color=self.accent_color,
+            text_color=self.text_color,
+            placeholder_text_color="#888888",
+            font=("Arial", 14)
+        )
+        self.login_entry.pack(pady=10)
 
-        # Информация о пользователе
-        self.user_info_label = ctk.CTkLabel(self.main_frame, text="", font=self.text_font, text_color="#FFFFFF")
-        self.user_info_label.grid(row=1, column=0, columnspan=2, pady=(5, 10), sticky="n")
+        self.password_entry = ctk.CTkEntry(
+            self.login_frame,
+            placeholder_text="Пароль",
+            show="•",
+            width=300,
+            height=50,
+            fg_color=self.button_color,
+            border_color=self.accent_color,
+            text_color=self.text_color,
+            placeholder_text_color="#888888",
+            font=("Arial", 14)
+        )
+        self.password_entry.pack(pady=10)
 
-        # Фрейм прав root
-        root_frame = ctk.CTkFrame(self.main_frame, fg_color="#8B0000" if not self.vpn_manager.is_admin() else "#2E8B57")
-        root_frame.grid(row=2, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        # Кнопка входа
+        self.login_btn = ctk.CTkButton(
+            self.login_frame,
+            text="Войти",
+            command=self.login,
+            width=300,
+            height=50,
+            fg_color=self.accent_color,
+            hover_color="#9C4DFF" if self.current_theme == "dark" else "#7B1FA2",
+            text_color="#FFFFFF",
+            font=("Arial", 16, "bold")
+        )
+        self.login_btn.pack(pady=20)
 
-        root_text = "🛡️ Запущено с правами root" if self.vpn_manager.is_admin() else "⚠️ Требуются права root"
-        root_label = ctk.CTkLabel(root_frame, text=root_text, font=ctk.CTkFont(weight="bold"))
-        root_label.pack(padx=10, pady=10)
+        # Кнопка выхода из приложения
+        self.exit_btn = ctk.CTkButton(
+            self.login_frame,
+            text="Выход",
+            command=self.exit_app,
+            width=300,
+            height=50,
+            fg_color="#FF4444",
+            hover_color="#CC0000",
+            text_color="#FFFFFF",
+            font=("Arial", 16, "bold")
+        )
+        self.exit_btn.pack(pady=10)
 
-        if not self.vpn_manager.is_admin():
-            root_button = ctk.CTkButton(
-                root_frame,
-                text="Перезапустить с правами root",
-                command=self.restart_as_admin,
-                fg_color="#DC143C",
-                hover_color="#FF4500"
+        # ------------------ МЕНЮ (после входа) ------------------
+        self.menu_frame = ctk.CTkFrame(self, fg_color=self.frame_bg, corner_radius=10)
+
+        menu_buttons = [
+            ("Основной экран", self.show_main_screen),
+            ("Настройки", self.show_settings),
+            ("Выйти", self.logout)
+        ]
+
+        for text, command in menu_buttons:
+            btn = ctk.CTkButton(
+                self.menu_frame,
+                text=text,
+                command=command,
+                fg_color=self.button_color,
+                hover_color=self.hover_color,
+                text_color=self.text_color,
+                corner_radius=8,
+                height=40,
+                font=("Arial", 14)
             )
-            root_button.pack(padx=10, pady=(0, 10))
+            btn.pack(side="left", padx=5, pady=5, expand=True)
 
-        # Фрейм выбора файла
-        file_frame = ctk.CTkFrame(self.main_frame)
-        file_frame.grid(row=3, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
+        # ------------------ ОСНОВНОЙ ЭКРАН (ЦЕНТРИРОВАННЫЙ) ------------------
+        self.main_frame = ctk.CTkFrame(self, fg_color=self.frame_bg, corner_radius=15)
 
-        ctk.CTkLabel(file_frame, text="Файл конфигурации (.ovpn):",
-                    font=ctk.CTkFont(weight="bold")).pack(anchor="w", padx=10, pady=(10, 5))
+        # Центральный контейнер для всего контента
+        self.center_container = ctk.CTkFrame(self.main_frame, fg_color="transparent")
+        self.center_container.pack(expand=True, fill="both")
 
-        file_selection_frame = ctk.CTkFrame(file_frame, fg_color="transparent")
-        file_selection_frame.pack(fill="x", padx=10, pady=(0, 10))
+        # Верхняя часть (отступ)
+        top_space = ctk.CTkFrame(self.center_container, fg_color="transparent", height=60)
+        top_space.pack(fill="x")
 
-        self.file_entry = ctk.CTkEntry(file_selection_frame, placeholder_text="Выберите .ovpn файл...")
-        self.file_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-
-        self.browse_button = ctk.CTkButton(
-            file_selection_frame,
-            text="Обзор",
-            width=80,
-            command=self.on_browse_button_clicked
+        # Логотип на основном экране
+        self.main_logo = ctk.CTkLabel(
+            self.center_container,
+            text="Kvanet VPN",
+            font=("Arial", 28, "bold"),
+            text_color=self.accent_color
         )
-        self.browse_button.pack(side="right")
+        self.main_logo.pack(pady=(0, 60))
 
-        # Фрейм установки OpenVPN
-        self.install_frame = ctk.CTkFrame(self.main_frame, fg_color="#2B2B2B")
+        # ПЕРЕКЛЮЧАТЕЛЬ СЕРВЕРА с флагами
+        self.switch_container = ctk.CTkFrame(self.center_container, fg_color="transparent")
+        self.switch_container.pack(pady=20)
 
-        info_text = """OpenVPN не установлен. Для работы приложения необходимо установить OpenVPN."""
-
-        info_label = ctk.CTkLabel(self.install_frame, text=info_text, justify="left")
-        info_label.pack(padx=10, pady=10)
-
-        install_button_frame = ctk.CTkFrame(self.install_frame, fg_color="transparent")
-        install_button_frame.pack(padx=10, pady=(0, 10))
-
-        self.install_button = ctk.CTkButton(
-            install_button_frame,
-            text="📥 Установить OpenVPN автоматически",
-            command=self.install_openvpn,
-            fg_color="#1E90FF",
-            hover_color="#4169E1"
+        # Флаг Нидерландов слева
+        self.nl_flag_label = ctk.CTkLabel(
+            self.switch_container,
+            text="",
+            image=self.nl_flag_image
         )
-        self.install_button.pack(side="left", padx=(0, 10))
+        self.nl_flag_label.pack(side="left", padx=15)
 
-        self.manual_install_button = ctk.CTkButton(
-            install_button_frame,
-            text="📖 Установить вручную",
-            command=self.install_openvpn_manual,
-            fg_color="#32CD32",
-            hover_color="#228B22"
+        # Сам переключатель
+        self.server_switch = ctk.CTkSwitch(
+            self.switch_container,
+            text="",
+            command=self.on_server_switch,
+            width=70,
+            height=35,
+            switch_width=80,
+            switch_height=35,
+            button_color=self.accent_color,
+            button_hover_color="#9C4DFF" if self.current_theme == "dark" else "#7B1FA2",
+            progress_color=self.accent_color
         )
-        self.manual_install_button.pack(side="left")
+        self.server_switch.pack(side="left", padx=10)
 
-        # Фрейм управления
-        control_frame = ctk.CTkFrame(self.main_frame)
-        control_frame.grid(row=4, column=0, columnspan=2, sticky="ew", padx=10, pady=10)
+        # Флаг России справа
+        self.ru_flag_label = ctk.CTkLabel(
+            self.switch_container,
+            text="",
+            image=self.ru_flag_image
+        )
+        self.ru_flag_label.pack(side="left", padx=15)
 
-        control_buttons_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
-        control_buttons_frame.pack(fill="x", padx=10, pady=10)
+        # Статус подключения (визуальный индикатор)
+        self.status_indicator_frame = ctk.CTkFrame(self.center_container, fg_color="transparent")
+        self.status_indicator_frame.pack(pady=30)
 
-        self.connect_button = ctk.CTkButton(
-            control_buttons_frame,
-            text="Подключиться",
-            command=self.on_connect_button_clicked,
+        self.status_indicator = ctk.CTkLabel(
+            self.status_indicator_frame,
+            text="●",
+            font=("Arial", 28),
+            text_color="#888888"
+        )
+        self.status_indicator.pack()
+
+        self.status_text = ctk.CTkLabel(
+            self.status_indicator_frame,
+            text="Не подключено",
+            font=("Arial", 16),
+            text_color=self.text_color
+        )
+        self.status_text.pack(pady=10)
+
+        # Большая центральная кнопка
+        self.connect_toggle_btn = ctk.CTkButton(
+            self.center_container,
+            text="ПОДКЛЮЧИТЬСЯ",
+            command=self.toggle_vpn_connection,
+            width=280,
+            height=70,
+            font=("Arial", 20, "bold"),
             fg_color="#2E8B57",
             hover_color="#3CB371",
-            state="disabled"
+            text_color="#FFFFFF",
+            corner_radius=15
         )
-        self.connect_button.pack(side="left", padx=(0, 10))
+        self.connect_toggle_btn.pack(pady=30)
 
-        self.kill_all_button = ctk.CTkButton(
-            control_buttons_frame,
-            text="Отключиться",
-            command=self.on_kill_all_clicked,
-            fg_color="#DC143C",
-            hover_color="#FF4500",
+        # Нижняя часть (отступ)
+        bottom_space = ctk.CTkFrame(self.center_container, fg_color="transparent", height=40)
+        bottom_space.pack(fill="x")
+
+        # ------------------ НАСТРОЙКИ ------------------
+        self.settings_frame = ctk.CTkFrame(self, fg_color=self.frame_bg, corner_radius=15)
+
+        # Центральный контейнер для настроек
+        self.settings_center = ctk.CTkFrame(self.settings_frame, fg_color="transparent")
+        self.settings_center.pack(expand=True, fill="both", padx=20, pady=20)
+
+        # Заголовок настроек
+        settings_title = ctk.CTkLabel(
+            self.settings_center,
+            text="Настройки",
+            font=("Arial", 24, "bold"),
+            text_color=self.accent_color
         )
-        self.kill_all_button.pack(side="left", padx=(0, 10))
+        settings_title.pack(pady=(20, 40))
 
-        self.clear_logs_button = ctk.CTkButton(
-            control_buttons_frame,
-            text="Очистить логи",
-            command=self.on_clear_logs_button_clicked
+        # Выбор темы
+        theme_frame = ctk.CTkFrame(self.settings_center, fg_color="transparent")
+        theme_frame.pack(pady=20)
+
+        # Исправляем: теперь text_color динамически меняется
+        self.theme_label = ctk.CTkLabel(
+            theme_frame,
+            text="ТЕМА",
+            font=("Arial", 18, "bold"),
+            text_color=self.text_color  # Динамический цвет
         )
-        self.clear_logs_button.pack(side="left")
+        self.theme_label.pack(pady=(0, 15))
 
-        # Прогресс бар и статус
-        status_frame = ctk.CTkFrame(control_frame, fg_color="transparent")
-        status_frame.pack(fill="x", padx=10, pady=(0, 10))
+        self.theme_var = ctk.StringVar(value=self.current_theme)
 
-        self.status_label = ctk.CTkLabel(status_frame, text="Проверка OpenVPN...",
-                                       font=ctk.CTkFont(weight="bold"))
-        self.status_label.pack(anchor="w")
+        theme_buttons_frame = ctk.CTkFrame(theme_frame, fg_color="transparent")
+        theme_buttons_frame.pack()
 
-        self.progress_bar = ctk.CTkProgressBar(status_frame)
-        self.progress_bar.pack(fill="x", pady=(5, 0))
-        self.progress_bar.set(0)
-
-        # Фрейм логов - ЗНАЧИТЕЛЬНО УВЕЛИЧЕН
-        log_frame = ctk.CTkFrame(self.main_frame)
-        log_frame.grid(row=5, column=0, columnspan=2, sticky="nsew", padx=10, pady=10)
-        self.main_frame.grid_rowconfigure(5, weight=1)  # Даем логам больше места
-
-        log_header_frame = ctk.CTkFrame(log_frame, fg_color="transparent")
-        log_header_frame.pack(fill="x", padx=10, pady=(10, 5))
-
-        ctk.CTkLabel(log_header_frame, text="Логи подключения:",
-                    font=ctk.CTkFont(weight="bold")).pack(side="left")
-
-        # Кнопка проверки IP
-        self.check_ip_button = ctk.CTkButton(
-            log_header_frame,
-            text="🌐 Проверить IP",
-            command=self.check_current_ip,
-            width=100,
-            fg_color="#4169E1",
-            hover_color="#6495ED"
-        )
-        self.check_ip_button.pack(side="right")
-        # Рядом с кнопкой проверки IP в log_header_frame
-        self.check_subscription_button = ctk.CTkButton(
-            log_header_frame,
-            text="🔄 Проверить подписку",
-            command=self.check_subscription_status,
+        self.dark_btn = ctk.CTkButton(
+            theme_buttons_frame,
+            text="Тёмная",
             width=120,
-            fg_color="#FFA500",
-            hover_color="#FF8C00"
+            height=45,
+            fg_color=self.accent_color if self.current_theme == "dark" else self.button_color,
+            hover_color=self.hover_color,
+            text_color="#FFFFFF" if self.current_theme == "dark" else self.text_color,
+            font=("Arial", 14),
+            command=lambda: self.set_theme("dark")
         )
-        self.check_subscription_button.pack(side="right", padx=(5, 0))
-        # Текстовое поле для логов - УВЕЛИЧЕНО
-        self.log_text = scrolledtext.ScrolledText(
-            log_frame,
-            wrap="word",
-            bg="#1E1E1E",
-            fg="#FFFFFF",
-            insertbackground="#FFFFFF",
-            font=("DejaVu Sans Mono", 10),
-            height=20,  # Увеличил высоту
-            width=100   # Увеличил ширину
+        self.dark_btn.pack(side="left", padx=10)
+
+        self.light_btn = ctk.CTkButton(
+            theme_buttons_frame,
+            text="Светлая",
+            width=120,
+            height=45,
+            fg_color=self.accent_color if self.current_theme == "light" else self.button_color,
+            hover_color=self.hover_color,
+            text_color="#000000" if self.current_theme == "light" else self.text_color,
+            font=("Arial", 14),
+            command=lambda: self.set_theme("light")
         )
-        self.log_text.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.light_btn.pack(side="left", padx=10)
 
-        # Кнопка выхода
-        self.back_button = ctk.CTkButton(self.main_frame, text="Выход", command=self.back_event,
-                                        fg_color="#FF4444", hover_color="#CC0000", corner_radius=10, width=120)
-        self.back_button.grid(row=6, column=1, pady=10, padx=10, sticky="e")
+        # Кнопка титров
+        credits_btn = ctk.CTkButton(
+            self.settings_center,
+            text="Титры",
+            command=self.show_rolling_credits,
+            width=200,
+            height=50,
+            fg_color=self.accent_color,
+            text_color="#FFFFFF",
+            font=("Arial", 16, "bold"),
+            corner_radius=10
+        )
+        credits_btn.pack(pady=60)
 
-        # Показываем страницу входа по умолчанию
-        self.show_sign_in()
+        # Нижние надписи (с динамическими цветами)
+        bottom_frame = ctk.CTkFrame(self.settings_center, fg_color="transparent")
+        bottom_frame.pack(side="bottom", pady=20)
 
+        self.version_label = ctk.CTkLabel(
+            bottom_frame,
+            text="Kvanet VPN Client 2.1.5",
+            font=("Arial", 12),
+            text_color=self.text_color  # Динамический цвет
+        )
+        self.version_label.pack()
 
+        self.made_label = ctk.CTkLabel(
+            bottom_frame,
+            text="Сделано в Лобачевском",
+            font=("Arial", 11),
+            text_color=self.text_color  # Динамический цвет
+        )
+        self.made_label.pack(pady=(5, 0))
 
-    def check_current_ip(self):
-        """Проверка текущего IP адреса"""
-        def check_ip_thread():
-            self.add_log_message("🔍 Проверка текущего IP-адреса...")
-            try:
-                public_ip = self.vpn_manager.get_public_ip()
-                if public_ip:
-                    self.add_log_message(f"🌐 Текущий публичный IP: {public_ip}")
-                else:
-                    self.add_log_message("❌ Не удалось определить публичный IP")
-            except Exception as e:
-                self.add_log_message(f"❌ Ошибка при проверке IP: {str(e)}")
+    def on_server_switch(self):
+        """Обработка переключения сервера"""
+        if self.server_switch.get():
+            self.server_var.set("ru")
+        else:
+            self.server_var.set("world")
 
-        thread = threading.Thread(target=check_ip_thread)
-        thread.daemon = True
-        thread.start()
+    def set_theme(self, theme):
+        """Установка темы через кнопки"""
+        self.current_theme = theme
+        self.theme_var.set(theme)
+        self.setup_theme()
+        self.update_theme_colors()
 
-    def sign_in_event(self):
-        global current_user_global, current_password_global
-        #"Вход через API с проверкой подписки"""
-        login = self.username_entry.get().strip()
+    def update_theme_colors(self):
+        """Обновление цветов всех виджетов при смене темы"""
+        # Обновление всех фреймов
+        frames = [self.login_frame, self.menu_frame, self.main_frame, self.settings_frame]
+        for frame in frames:
+            if frame.winfo_exists():
+                frame.configure(fg_color=self.frame_bg)
+
+        # Обновление текстовых цветов
+        text_widgets = [
+            self.logo_label, self.main_logo,
+            self.login_entry, self.password_entry,
+            self.status_text, self.theme_label,
+            self.version_label, self.made_label
+        ]
+
+        for widget in text_widgets:
+            if widget.winfo_exists():
+                if hasattr(widget, 'configure'):
+                    try:
+                        widget.configure(text_color=self.text_color)
+                    except:
+                        pass
+
+        # Обновление кнопок меню
+        for widget in self.menu_frame.winfo_children():
+            if isinstance(widget, ctk.CTkButton):
+                widget.configure(
+                    fg_color=self.button_color,
+                    hover_color=self.hover_color,
+                    text_color=self.text_color
+                )
+
+        # Обновление кнопок темы в настройках
+        if self.dark_btn.winfo_exists():
+            self.dark_btn.configure(
+                fg_color=self.accent_color if self.current_theme == "dark" else self.button_color,
+                text_color="#FFFFFF"
+            )
+
+        if self.light_btn.winfo_exists():
+            text_color = "#000000" if self.current_theme == "light" else self.text_color
+            self.light_btn.configure(
+                fg_color=self.accent_color if self.current_theme == "light" else self.button_color,
+                text_color=text_color
+            )
+
+    # ------------------ АНИМАЦИЯ КНОПКИ ------------------
+    def start_connecting_animation(self):
+        """Запуск анимации точек при подключении"""
+        if self.is_connecting:
+            self.dot_counter = (self.dot_counter + 1) % 4
+            dots = "." * self.dot_counter
+            self.connect_toggle_btn.configure(text=f"ПОДКЛЮЧЕНИЕ{dots}")
+            self.after(500, self.start_connecting_animation)
+
+    def stop_connecting_animation(self):
+        """Остановка анимации"""
+        self.is_connecting = False
+        self.dot_counter = 0
+
+    def update_connect_button(self):
+        """Обновление состояния кнопки"""
+        if not self.current_user:
+            return
+
+        current_ip = self.vpn.get_public_ip()
+        vpn_ips = ["147.45.255.17", "95.163.232.136"]
+
+        if current_ip in vpn_ips:
+            if self.is_connecting:
+                self.is_connecting = False
+                self.stop_connecting_animation()
+
+            self.vpn.is_connected = True
+
+            self.connect_toggle_btn.configure(
+                text="ОТКЛЮЧИТЬСЯ",
+                fg_color="#FF4444",
+                hover_color="#CC0000",
+                state="normal"
+            )
+
+            self.status_indicator.configure(text_color="#00FF00")
+            self.status_text.configure(text="Подключено")
+
+            self.is_connecting = False
+
+        elif self.is_connecting:
+            self.connect_toggle_btn.configure(
+                fg_color="#FFA500",
+                hover_color="#FF8C00",
+                state="normal"
+            )
+            self.status_indicator.configure(text_color="#FFA500")
+            self.status_text.configure(text="Подключение...")
+        else:
+            self.vpn.is_connected = False
+            self.connect_toggle_btn.configure(
+                text="ПОДКЛЮЧИТЬСЯ",
+                fg_color="#2E8B57",
+                hover_color="#3CB371",
+                state="normal"
+            )
+            self.status_indicator.configure(text_color="#888888")
+            self.status_text.configure(text="Не подключено")
+
+    # ------------------ ОСНОВНЫЕ МЕТОДЫ ------------------
+    def login(self):
+        """Авторизация пользователя"""
+        login = self.login_entry.get().strip()
         password = self.password_entry.get()
 
         if not login or not password:
-            self.login_error_label.configure(text="Логин и пароль обязательны")
+            messagebox.showerror("Ошибка", "Введите логин и пароль")
             return
-        else:
-            self.login_error_label.configure(text="")
-
-        self.sign_in_button.configure(state="disabled", text="Вход...")
 
         try:
-            response = requests.post(f"{API_BASE_URL}/api/app/login",
-                                json={'login': login, 'password': password})
-            result = response.json()
-
-            if result.get('success'):
-                self.current_user = result['user']
-                self.current_password = password
-
-                # Сохраняем всё в глобалки
-                current_user_global = result['user']
-                current_password_global = password
-                # Добавляем проверку подписки
-                subscription_status = result['user'].get('subscription', False)
-                self.current_user['subscription'] = subscription_status
-
-                self.add_log_message("✅ Вход успешен!")
-                self.add_log_message(f"📊 Статус подписки: {'Активна' if subscription_status else 'Неактивна'}")
-
-                if not subscription_status:
-                    self.add_log_message("❌ Подписка неактивна. Обратитесь к администратору.")
-
-                self.login_error_label.configure(text="")
-                self.show_main_frame()
-            else:
-                error_msg = result.get('error', 'Ошибка входа')
-                self.login_error_label.configure(text=error_msg)
-                self.add_log_message(f"❌ {error_msg}")
-
-        except requests.exceptions.RequestException as e:
-            error_msg = f"Ошибка подключения к серверу: {str(e)}"
-            self.login_error_label.configure(text=error_msg)
-            self.add_log_message(f"❌ {error_msg}")
+            r = requests.post(f"{API_BASE_URL}/api/app/login",
+                            json={"login": login, "password": password})
+            data = r.json()
         except Exception as e:
-            error_msg = f"Неожиданная ошибка: {str(e)}"
-            self.login_error_label.configure(text=error_msg)
-            self.add_log_message(f"❌ {error_msg}")
-        finally:
-            self.sign_in_button.configure(state="normal", text="Войти")
-
-
-
-    def install_openvpn(self):
-        #"""Установка OpenVPN автоматически через pacman"""
-        if not self.vpn_manager.is_admin():
-            messagebox.showerror("Ошибка", "Для установки OpenVPN требуются права root")
+            messagebox.showerror("Ошибка", f"Ошибка подключения: {e}")
             return
 
-        self.install_button.configure(state="disabled", text="⏳ Установка...")
-
-        def install_thread():
-            success = self.vpn_manager.install_openvpn()
-            if success:
-                self.add_log_message("✅ Установка завершена успешно!")
-                self.after(0, self.check_openvpn_installation)
-            else:
-                self.add_log_message("❌ Ошибка установки OpenVPN")
-                self.after(0, lambda: self.install_button.configure(state="normal", text="📥 Установить OpenVPN автоматически"))
-
-        thread = threading.Thread(target=install_thread)
-        thread.daemon = True
-        thread.start()
-
-    def install_openvpn_manual(self):
-        """Показывает инструкции по ручной установке"""
-        instructions = """
-        Для установки OpenVPN вручную выполните в терминале:
-
-        1. Обновите систему:
-        sudo pacman -Syu
-
-        2. Установите OpenVPN:
-            sudo pacman -S openvpn
-
-        3. (Опционально) Установите сетевой менеджер:
-            sudo pacman -S networkmanager-openvpn
-
-        После установки перезапустите приложение.
-        """
-        messagebox.showinfo("Ручная установка OpenVPN", instructions)
-        self.add_log_message("📖 Показаны инструкции по ручной установке")
-
-    def check_openvpn_installation(self):
-        """Проверяем установку OpenVPN"""
-        def check_thread():
-            self.add_log_message("🔍 Проверка установки OpenVPN...")
-            time.sleep(1)
-
-            if self.vpn_manager.is_openvpn_installed():
-                openvpn_path = self.vpn_manager.get_openvpn_path()
-                self.add_log_message(f"✅ OpenVPN найден: {openvpn_path}")
-
-                # Скрываем фрейм установки
-                self.install_frame.grid_forget()
-
-                if self.vpn_manager.is_admin():
-                    self.add_log_message("✅ Права root подтверждены")
-                    self.update_status("Готов к работе", 0.0)
-                else:
-                    self.add_log_message("⚠️ Запустите приложение с правами root")
-                    self.update_status("Требуются права root", 0.0)
-            else:
-                self.add_log_message("❌ OpenVPN не установлен")
-                # Показываем фрейм установки
-                self.install_frame.grid(row=7, column=0, columnspan=2, sticky="ew", padx=10, pady=5)
-                self.update_status("Требуется установка OpenVPN", 0.0)
-                self.connect_button.configure(state="disabled")
-
-        thread = threading.Thread(target=check_thread)
-        thread.daemon = True
-        thread.start()
-
-    def on_kill_all_clicked(self):
-        #"""Принудительное отключение всех VPN соединений"""
-        def kill_thread():
-            self.add_log_message("🛑 Принудительное отключение всех VPN соединений...")
-            self.vpn_manager.kill_all_openvpn()
-            self.vpn_manager.is_connected = False
-            self.update_status("Не подключено", 0.0)
-
-        thread = threading.Thread(target=kill_thread)
-        thread.daemon = True
-        thread.start()
-
-    def on_clear_logs_button_clicked(self):
-        """Очистка логов"""
-        self.log_text.delete("1.0", "end")
-        self.add_log_message("🧹 Логи очищены")
-
-
-    def check_subscription_status(self):
-        """Проверка статуса подписки у сервера"""
-        if not self.current_user:
-            self.add_log_message("❌ Нет данных пользователя для проверки подписки")
+        if not data.get("success"):
+            messagebox.showerror("Ошибка", "Неверный логин или пароль")
             return
 
-        def check_thread():
-            try:
-                self.add_log_message("🔍 Проверка статуса подписки...")
-
-                # Для проверки подписки нам нужен тот же endpoint что и для входа
-                # но нам не нужно сохранять сессию, просто получаем актуальные данные
-                response = requests.post(f"{API_BASE_URL}/api/app/login",
-                                    json={
-                                        'login': self.current_user['login'],
-                                        'password': ''  # Пустой пароль не сработает
-                                    },
-                                    timeout=10)
-
-                # Если запрос с пустым паролем не работает, попробуем другой подход
-                # Давай просто получим обновленные данные пользователя через тот же endpoint
-                # но с текущими credentials (если они сохранены)
-
-                # Временно используем тот же логин/пароль что при входе
-                # В реальном приложении нужно хранить токен или сессию
-                self.add_log_message("⚠️ Для проверки подписки требуется повторная аутентификация")
-                self.add_log_message("ℹ️ Функция проверки подписки требует доработки сервера")
-
-                # Временное решение: просто показываем текущий статус
-                current_status = self.current_user.get('subscription', False)
-                status_text = "активна" if current_status else "неактивна"
-                self.add_log_message(f"📊 Текущий статус подписки: {status_text}")
-                self.add_log_message("💡 Для актуального статуса выполните выход и вход заново")
-
-            except requests.exceptions.RequestException as e:
-                self.add_log_message(f"❌ Ошибка сети при проверке подписки: {str(e)}")
-            except Exception as e:
-                self.add_log_message(f"⚠️ Ошибка при проверке подписки: {str(e)}")
-
-        thread = threading.Thread(target=check_thread)
-        thread.daemon = True
-        thread.start()
-
-    def back_event(self):
-        """Выход из аккаунта"""
-        self.current_user = None
-        self.main_frame.grid_forget()
-        self.show_sign_in()
-
-    def show_sign_in(self):
-        """Показ формы входа"""
-        self.main_frame.grid_forget()
-        self.sign_in_frame.grid(row=0, column=0, padx=200, pady=100, sticky="nsew")
-        self.username_entry.delete(0, 'end')
-        self.password_entry.delete(0, 'end')
-
-    def show_main_frame(self):
-        """Показ главного фрейма с данными пользователя"""
-        self.sign_in_frame.grid_forget()
-        self.main_frame.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")  # Уменьшил отступы для большего пространства
-        self.update_user_display()
-
-    def update_user_display(self):
-        """Обновление отображения данных пользователя"""
-        if self.current_user:
-            subscription_status = self.current_user.get('subscription', False)
-            status_text = "Активна" if subscription_status else "Неактивна"
-            status_color = "#28A745" if subscription_status else "#FF4444"
-
-            self.user_info_label.configure(
-                text=f"Пользователь: {self.current_user['login']} | Монеты: {self.current_user['coin']} | Подписка: {status_text}"
-            )
-
-    def back_event(self):
-        """Выход из аккаунта"""
-        self.current_user = None
-        self.main_frame.grid_forget()
-        self.show_sign_in()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # ------------------ Лог и статус ------------------
-
-    def add_log_message(self, message):
-        def safe_add():
-            self.log_text.insert("end", f"{message}\n")
-            self.log_text.see("end")
-            self.log_text.update_idletasks()
-        self.after(0, safe_add)
-
-    def update_status(self, status, progress=None):
-        def safe_update():
-            self.status_label.configure(text=status)
-            if progress is not None:
-                self.progress_bar.set(progress)
-            can_connect = (self.current_ovpn_file is not None and
-                           self.vpn_manager.is_openvpn_installed() and
-                           self.vpn_manager.is_admin() and
-                           self.current_user and self.current_user.get('subscription', False) and
-                           not self.vpn_manager.get_status())
-            self.connect_button.configure(state="normal" if can_connect else "disabled")
-        self.after(0, safe_update)
-
-
-
-
-
-
-    # ------------------ Действия ------------------
-
-    def on_browse_button_clicked(self):
-        file_path = filedialog.askopenfilename(title="Выберите OVPN файл",initialdir="/",
-                                               filetypes=[("OVPN файлы","*.ovpn"),("Все файлы","*.*")])
-        if file_path:
-            self.current_ovpn_file = file_path
-            self.file_entry.delete(0,"end")
-            self.file_entry.insert(0,file_path)
-            self.add_log_message(f"📁 Выбран файл: {os.path.basename(file_path)}")
-            self.update_status("Готов к подключению",0.0)
-
-    def on_connect_button_clicked(self):
-        if not self.current_ovpn_file:
-            self.add_log_message("❌ Выберите .ovpn файл")
+        if not data["user"].get("subscription"):
+            messagebox.showerror("Ошибка", "Подписка неактивна")
             return
-        if not self.current_user or not self.current_user.get('subscription', False):
-            self.add_log_message("❌ Подключение невозможно: подписка неактивна")
-            return
-        
-        # Обновляем глобальные переменные
+
+        self.current_user = data["user"]
+        self.current_password = password
+        self.is_authenticated = True
+
         global current_user_global, current_password_global
         current_user_global = self.current_user
-        current_password_global = self.current_password
-        
-        def thread_connect():
-            success = self.vpn_manager.connect(self.current_ovpn_file)
+        current_password_global = password
+
+        self.save_credentials(login, password)
+        self.show_main_interface()
+        self.add_log(f"Вход выполнен: {login}")
+
+    def toggle_vpn_connection(self):
+        """Переключение состояния VPN"""
+        if not self.current_user:
+            messagebox.showerror("Ошибка", "Сначала выполните вход")
+            return
+
+        current_ip = self.vpn.get_public_ip()
+        vpn_ips = ["147.45.255.17", "95.163.232.136"]
+
+        if current_ip in vpn_ips:
+            self.vpn.disconnect()
+            self.connect_toggle_btn.configure(
+                text="ПОДКЛЮЧИТЬСЯ",
+                fg_color="#2E8B57",
+                hover_color="#3CB371"
+            )
+            self.status_indicator.configure(text_color="#888888")
+            self.status_text.configure(text="Не подключено")
+            self.is_connecting = False
+            self.stop_connecting_animation()
+        else:
+            server_type = self.server_var.get()
+            self.is_connecting = True
+            self.start_connecting_animation()
+            self.status_indicator.configure(text_color="#FFA500")
+            self.status_text.configure(text="Подключение...")
+
+            success = self.vpn.connect(server_type, self.current_user["login"], self.current_password)
+
             if not success:
-                self.add_log_message("❌ Не удалось запустить подключение")
-        
-        t = threading.Thread(target=thread_connect)
-        t.daemon = True
-        t.start()
+                self.is_connecting = False
+                self.stop_connecting_animation()
+                self.connect_toggle_btn.configure(
+                    text="ПОДКЛЮЧИТЬСЯ",
+                    fg_color="#2E8B57",
+                    hover_color="#3CB371"
+                )
+                self.status_indicator.configure(text_color="#888888")
+                self.status_text.configure(text="Не подключено")
 
+    def check_vpn_status(self):
+        """Периодическая проверка статуса VPN"""
+        if not self.current_user:
+            self.after(2000, self.check_vpn_status)
+            return
 
+        self.update_connect_button()
 
+        self.after(2000, self.check_vpn_status)
 
+    def start_ip_checker(self):
+        """Запуск периодической проверки IP"""
+        self.check_vpn_status()
 
-# ------------------ Запуск ------------------
+    def add_log(self, msg):
+        """Вывод лога в терминал"""
+        print(msg)
 
+    def change_theme(self):
+        """Смена темы приложения (старый метод)"""
+        new_theme = self.theme_var.get()
+        if new_theme != self.current_theme:
+            self.current_theme = new_theme
+            self.setup_theme()
+            self.update_theme_colors()
+
+    def show_rolling_credits(self):
+        """Показать анимированные титры"""
+        CreditsRollWindow(self, self.current_theme)
+
+    # ------------------ УПРАВЛЕНИЕ ИНТЕРФЕЙСОМ ------------------
+    def show_login_screen(self):
+        """Показать экран входа"""
+        self.hide_all_frames()
+        self.login_frame.pack(expand=True, fill="both", padx=40, pady=40)
+
+    def show_main_interface(self):
+        """Показать основной интерфейс после входа"""
+        self.hide_all_frames()
+        self.menu_frame.pack(fill="x", padx=20, pady=(20, 10))
+        self.main_frame.pack(expand=True, fill="both", padx=20, pady=(0, 20))
+
+        if self.server_var.get() == "ru":
+            self.server_switch.select()
+        else:
+            self.server_switch.deselect()
+
+    def show_main_screen(self):
+        """Показать основной экран из меню"""
+        self.hide_all_frames()
+        self.menu_frame.pack(fill="x", padx=20, pady=(20, 10))
+        self.main_frame.pack(expand=True, fill="both", padx=20, pady=(0, 20))
+
+    def show_settings(self):
+        """Показать настройки"""
+        self.hide_all_frames()
+        self.menu_frame.pack(fill="x", padx=20, pady=(20, 10))
+        self.settings_frame.pack(expand=True, fill="both", padx=20, pady=(0, 20))
+
+    def hide_all_frames(self):
+        """Скрыть все фреймы"""
+        frames = [self.login_frame, self.menu_frame, self.main_frame, self.settings_frame]
+        for frame in frames:
+            frame.pack_forget()
+
+    def logout(self):
+        """Выход из аккаунта"""
+        if self.vpn.is_connected:
+            self.vpn.disconnect()
+            time.sleep(1)
+
+        self.current_user = None
+        self.current_password = None
+        self.is_authenticated = False
+        self.is_connecting = False
+
+        global current_user_global, current_password_global
+        current_user_global = None
+        current_password_global = None
+
+        self.clear_saved_credentials()
+        self.add_log("Выход из аккаунта")
+        self.show_login_screen()
+
+    def exit_app(self):
+        """Выход из приложения"""
+        if self.vpn.is_connected:
+            self.vpn.disconnect()
+            time.sleep(1)
+
+        self.destroy()
+        sys.exit(0)
+    def get_credentials_path(self):
+        config_dir = Path.home() / ".config" / "kvanet"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        cred_path = config_dir / "credentials.json"
+        return cred_path
+
+    def save_credentials(self, login, password):
+        cred_path = self.get_credentials_path()
+        data = {
+            "login": login,
+            "password": password
+        }
+        with open(cred_path, "w") as f:
+            json.dump(data, f)
+        os.chmod(cred_path, 0o600)
+
+    def load_saved_credentials(self):
+        cred_path = self.get_credentials_path()
+        if not cred_path.exists():
+            return
+        try:
+            with open(cred_path, "r") as f:
+                data = json.load(f)
+            self.login_entry.insert(0, data.get("login", ""))
+            self.password_entry.insert(0, data.get("password", ""))
+        except Exception as e:
+            print(f"Не удалось загрузить учётные данные: {e}")
+
+    def clear_saved_credentials(self):
+        cred_path = self.get_credentials_path()
+        if cred_path.exists():
+            cred_path.unlink()
+
+# ------------------ ТОЧКА ВХОДА ------------------
 if __name__ == "__main__":
-    if sys.platform != "linux":
-        print("❌ Только Linux поддерживается!")
+    if os.geteuid() != 0:
+        messagebox.showerror(
+            "Требуются права администратора",
+            "Для работы VPN необходимы права администратора.\n\n"
+            "Пожалуйста, запустите приложение через ярлык из меню."
+        )
         sys.exit(1)
+
     app = App()
     app.mainloop()
