@@ -70,6 +70,7 @@ cp titry.mp4 "$INSTALL_DIR/"
 cp run_vpn.sh "$INSTALL_DIR/"
 
 chmod 755 "$INSTALL_DIR/full.py"
+chmod 755 "$INSTALL_DIR/run_vpn.sh"
 
 # ------------------ CREATE VENV ------------------
 echo "[4/6] Создание Python virtualenv..."
