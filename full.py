@@ -32,6 +32,10 @@ class VPNManager:
         self.failed_attempts = 0
         self.expected_ip = None
         self.current_server = None
+        self.current_login = None
+        self.current_password = None
+        self.current_vpn_type = None
+        self.last_regeneration_time = 0  # Время последней перегенерации
 
     def set_log_callback(self, cb):
         self.log_callback = cb
@@ -67,11 +71,63 @@ class VPNManager:
                 continue
         return None
 
+    def regenerate_config(self, vpn_type, login, password):
+        """Перегенерация OVPN конфига через API"""
+        try:
+            self.log(f"🔄 Отправка запроса на перегенерацию конфига ({vpn_type})...")
+
+            r = requests.post(
+                f"{API_BASE_URL}/api/app/regenerate-ovpn",
+                json={
+                    "login": login,
+                    "password": password,
+                    "type": vpn_type,
+                    "reason": "failed_attempts"
+                },
+                timeout=15
+            )
+
+            data = r.json()
+
+            if data.get("success"):
+                self.log(f"✅ {data.get('message', 'Конфиг успешно перегенерирован')}")
+                self.last_regeneration_time = time.time()
+                self.failed_attempts = 0  # Сбрасываем счетчик после успешной перегенерации
+                return True
+            else:
+                error_msg = data.get("error", "Неизвестная ошибка")
+                self.log(f"❌ Ошибка перегенерации: {error_msg}")
+                return False
+
+        except Exception as e:
+            self.log(f"❌ Ошибка запроса перегенерации: {e}")
+            return False
+
+    def cleanup_temp_files(self):
+        """Очистка старых временных OVPN файлов"""
+        try:
+            temp_dir = tempfile.gettempdir()
+            for filename in os.listdir(temp_dir):
+                if filename.endswith('.ovpn') and 'tmp' in filename:
+                    filepath = os.path.join(temp_dir, filename)
+                    try:
+                        if os.path.getmtime(filepath) < time.time() - 3600:  # Старые файлы (>1 часа)
+                            os.remove(filepath)
+                    except:
+                        pass
+        except Exception as e:
+            pass
+
     def connect(self, vpn_type, login, password):
         """vpn_type: 'ru' - для подключения к РФ (из-за границы), 'world' - для выхода из РФ"""
         if not self.is_admin():
             self.log("Требуются права root")
             return False
+
+        # Сохраняем данные для возможной перегенерации
+        self.current_login = login
+        self.current_password = password
+        self.current_vpn_type = vpn_type
 
         # Устанавливаем ожидаемый IP в зависимости от сервера
         if vpn_type == "ru":
@@ -82,9 +138,34 @@ class VPNManager:
             server_name = "Нидерланды"
 
         self.current_server = server_name
+
+        # 🔥 ПРОВЕРЯЕМ НЕУДАЧНЫЕ ПОПЫТКИ И ПЕРЕГЕНЕРИРУЕМ ПРИ НЕОБХОДИМОСТИ
+        if self.failed_attempts >= 5:
+            current_time = time.time()
+            # Проверяем, прошло ли хотя бы 30 минут с последней перегенерации
+            if current_time - self.last_regeneration_time > 1800:  # 30 минут
+                self.log(f"⚠️  Слишком много неудачных попыток ({self.failed_attempts}), перегенерируем конфиг...")
+                success = self.regenerate_config(vpn_type, login, password)
+                if success:
+                    self.log("✅ Конфиг успешно перегенерирован")
+                    # Ждем немного после перегенерации
+                    time.sleep(2)
+                else:
+                    self.log("❌ Не удалось перегенерировать конфиг")
+                    self.failed_attempts += 1
+                    return False
+            else:
+                self.log(f"⚠️  Слишком много неудачных попыток, но перегенерация была недавно. Попробуйте позже.")
+                self.failed_attempts += 1
+                return False
+
         self.log(f"Подключение к {server_name}...")
 
+        # Очищаем старые временные файлы
+        self.cleanup_temp_files()
+
         try:
+            # Получаем OVPN конфиг через API
             r = requests.post(
                 f"{API_BASE_URL}/api/app/get-ovpn",
                 json={
@@ -96,13 +177,13 @@ class VPNManager:
             )
             data = r.json()
         except Exception as e:
-            self.log(f"Ошибка API: {e}")
+            self.log(f"❌ Ошибка API: {e}")
             self.failed_attempts += 1
             return False
 
         if not data.get("success"):
             error_msg = data.get("error", "Неизвестная ошибка")
-            self.log(f"Ошибка сервера: {error_msg}")
+            self.log(f"❌ Ошибка сервера: {error_msg}")
             self.failed_attempts += 1
             return False
 
@@ -114,13 +195,14 @@ class VPNManager:
         tmp.close()
         self.temp_ovpn_path = tmp.name
 
+        # Запускаем подключение в отдельном потоке
         threading.Thread(target=self._run_openvpn, args=(login, password, server_name), daemon=True).start()
         return True
 
     def _run_openvpn(self, login, password, server_name):
         """Запуск OpenVPN с проверкой IP"""
         try:
-            self.log(f"Запуск OpenVPN...")
+            self.log(f"🚀 Запуск OpenVPN...")
 
             cmd = f'echo -e "{login}\\n{password}" | openvpn --config {self.temp_ovpn_path} --auth-user-pass /dev/stdin --verb 1'
             self.process = subprocess.Popen(
@@ -132,6 +214,7 @@ class VPNManager:
                 bufsize=1
             )
 
+            # Удаляем временный файл после небольшой задержки
             time.sleep(1)
             if os.path.exists(self.temp_ovpn_path):
                 os.remove(self.temp_ovpn_path)
@@ -153,56 +236,58 @@ class VPNManager:
                     if current_ip == self.expected_ip:
                         self.is_connected = True
                         connected = True
-                        self.failed_attempts = 0
-                        self.log(f"Успешно подключено к {server_name}")
-                        self.log(f"Ваш IP: {current_ip}")
+                        self.failed_attempts = 0  # 🔥 Сбрасываем счетчик при успешном подключении
+                        self.log(f"✅ Успешно подключено к {server_name}")
+                        self.log(f"🌐 Ваш IP: {current_ip}")
                     else:
-                        self.log(f"Подключено, но IP не соответствует ({current_ip})")
-                        self.log(f"Ожидался IP: {self.expected_ip}")
+                        self.log(f"⚠️  Подключено, но IP не соответствует ({current_ip})")
+                        self.log(f"   Ожидался IP: {self.expected_ip}")
                         self.failed_attempts += 1
                         self.disconnect()
 
                     break
 
                 if "AUTH_FAILED" in line:
-                    self.log("Ошибка аутентификации")
+                    self.log("❌ Ошибка аутентификации")
                     self.failed_attempts += 1
                     break
 
                 if "ERROR" in line and "tls" not in line.lower():
-                    self.log(f"{line[:80]}")
+                    self.log(f"⚠️  {line[:80]}")
 
                 # Таймаут подключения
                 if time.time() - start_time > 30:
-                    self.log("Таймаут подключения")
+                    self.log("⏰ Таймаут подключения")
+                    self.failed_attempts += 1
                     break
 
             if not connected:
-                self.failed_attempts += 1
-                self.log("Не удалось подключиться")
+                self.log("❌ Не удалось подключиться")
 
-                if self.failed_attempts >= 5:
-                    config_type = "ru" if self.current_server == "Россия" else "world"
-                    self.log(f"Слишком много неудачных попыток ({self.failed_attempts})")
-                    self.log(f"Пожалуйста, перегенерируйте конфигурационный файл ({config_type})")
-                    self.failed_attempts = 0
+                # 🔥 ПРЕДЛАГАЕМ ПЕРЕГЕНЕРАЦИЮ ПРИ МНОЖЕСТВЕ НЕУДАЧ
+                if self.failed_attempts >= 3:
+                    self.log(f"⚠️  Уже {self.failed_attempts} неудачных попыток подключения")
+                    self.log(f"   При достижении 5 попыток конфиг будет автоматически перегенерирован")
 
                 if self.process:
                     self.process.terminate()
 
         except Exception as e:
-            self.log(f"Ошибка: {e}")
+            self.log(f"❌ Ошибка: {e}")
             self.failed_attempts += 1
 
     def disconnect(self):
         """Отключение VPN соединения"""
-        self.log("Отключение VPN...")
+        self.log("🔌 Отключение VPN...")
 
         # Принудительное завершение всех процессов OpenVPN
         self.kill_all_openvpn()
 
         self.is_connected = False
         self.process = None
+        self.current_login = None
+        self.current_password = None
+        self.current_vpn_type = None
 
     def kill_all_openvpn(self):
         """Принудительное завершение всех процессов OpenVPN"""
@@ -216,9 +301,9 @@ class VPNManager:
                     except:
                         pass
             if killed > 0:
-                self.log(f"Завершено процессов OpenVPN: {killed}")
+                self.log(f"🛑 Завершено процессов OpenVPN: {killed}")
         except Exception as e:
-            self.log(f"Ошибка при завершении процессов: {e}")
+            self.log(f"⚠️  Ошибка при завершении процессов: {e}")
 
 # ------------------ Анимированные титры ------------------
 class CreditsRollWindow(ctk.CTkToplevel):
@@ -240,34 +325,9 @@ class CreditsRollWindow(ctk.CTkToplevel):
                 else:
                     subprocess.call(['xdg-open', video_file])
             except:
-                # Если не удалось открыть видео, показываем анимацию
-                self.show_fallback_animation()
+                pass
         else:
-            self.show_fallback_animation()
-
-    def start_animation(self):
-        """Показать видео титры"""
-        import subprocess
-        import os
-
-        video_file = "titry.mp4"
-
-        if os.path.exists(video_file):
-            try:
-                # Открываем видео в отдельном процессе
-                if sys.platform == "win32":
-                    os.startfile(video_file)
-                elif sys.platform == "darwin":
-                    subprocess.call(['open', video_file])
-                else:
-                    subprocess.call(['xdg-open', video_file])
-            except:
-                # Если не удалось открыть видео, показываем анимацию
-                self.show_fallback_animation()
-        else:
-            self.show_fallback_animation()
-
-
+            pass
 
 # ------------------ ГЛАВНОЕ ПРИЛОЖЕНИЕ ------------------
 class App(ctk.CTk):
@@ -568,12 +628,11 @@ class App(ctk.CTk):
         theme_frame = ctk.CTkFrame(self.settings_center, fg_color="transparent")
         theme_frame.pack(pady=20)
 
-        # Исправляем: теперь text_color динамически меняется
         self.theme_label = ctk.CTkLabel(
             theme_frame,
             text="ТЕМА",
             font=("Arial", 18, "bold"),
-            text_color=self.text_color  # Динамический цвет
+            text_color=self.text_color
         )
         self.theme_label.pack(pady=(0, 15))
 
@@ -620,7 +679,22 @@ class App(ctk.CTk):
             font=("Arial", 16, "bold"),
             corner_radius=10
         )
-        credits_btn.pack(pady=60)
+        credits_btn.pack(pady=30)
+
+        # Кнопка перегенерации конфига (фиолетовая, в стиле дизайна)
+        self.regenerate_btn = ctk.CTkButton(
+            self.settings_center,
+            text="Перегенерировать конфиг",
+            command=self.force_regenerate_config,
+            width=200,
+            height=50,
+            fg_color=self.accent_color,
+            hover_color="#9C4DFF" if self.current_theme == "dark" else "#7B1FA2",
+            text_color="#FFFFFF",
+            font=("Arial", 16, "bold"),
+            corner_radius=10
+        )
+        self.regenerate_btn.pack(pady=10)
 
         # Нижние надписи (с динамическими цветами)
         bottom_frame = ctk.CTkFrame(self.settings_center, fg_color="transparent")
@@ -630,7 +704,7 @@ class App(ctk.CTk):
             bottom_frame,
             text="Kvanet VPN Client 2.1.5",
             font=("Arial", 12),
-            text_color=self.text_color  # Динамический цвет
+            text_color=self.text_color
         )
         self.version_label.pack()
 
@@ -638,7 +712,7 @@ class App(ctk.CTk):
             bottom_frame,
             text="Сделано в Лобачевском",
             font=("Arial", 11),
-            text_color=self.text_color  # Динамический цвет
+            text_color=self.text_color
         )
         self.made_label.pack(pady=(5, 0))
 
@@ -701,6 +775,13 @@ class App(ctk.CTk):
             self.light_btn.configure(
                 fg_color=self.accent_color if self.current_theme == "light" else self.button_color,
                 text_color=text_color
+            )
+
+        # Обновление кнопки перегенерации
+        if self.regenerate_btn.winfo_exists():
+            self.regenerate_btn.configure(
+                fg_color=self.accent_color,
+                hover_color="#9C4DFF" if self.current_theme == "dark" else "#7B1FA2"
             )
 
     # ------------------ АНИМАЦИЯ КНОПКИ ------------------
@@ -798,8 +879,34 @@ class App(ctk.CTk):
         current_password_global = password
 
         self.save_credentials(login, password)
+
+        # 🔥 ФОНОВАЯ ПРОВЕРКА И ГЕНЕРАЦИЯ КОНФИГОВ ПРИ ВХОДЕ
+        def check_and_generate_configs():
+            try:
+                for vpn_type in ['world', 'ru']:
+                    r = requests.post(
+                        f"{API_BASE_URL}/api/app/get-ovpn",
+                        json={
+                            "login": self.current_user["login"],
+                            "password": password,
+                            "type": vpn_type
+                        },
+                        timeout=10
+                    )
+                    if r.status_code == 200:
+                        data = r.json()
+                        if data.get('success'):
+                            self.add_log(f"✅ Конфиг {vpn_type} проверен/сгенерирован")
+                        else:
+                            self.add_log(f"⚠️  Ошибка конфига {vpn_type}: {data.get('error')}")
+            except Exception as e:
+                self.add_log(f"⚠️  Фоновая проверка конфигов: {e}")
+
+        # Запускаем в отдельном потоке
+        threading.Thread(target=check_and_generate_configs, daemon=True).start()
+
         self.show_main_interface()
-        self.add_log(f"Вход выполнен: {login}")
+        self.add_log(f"✅ Вход выполнен: {login}")
 
     def toggle_vpn_connection(self):
         """Переключение состояния VPN"""
@@ -811,6 +918,7 @@ class App(ctk.CTk):
         vpn_ips = ["147.45.255.17", "95.163.232.136"]
 
         if current_ip in vpn_ips:
+            # Если уже подключен - отключаем
             self.vpn.disconnect()
             self.connect_toggle_btn.configure(
                 text="ПОДКЛЮЧИТЬСЯ",
@@ -822,6 +930,7 @@ class App(ctk.CTk):
             self.is_connecting = False
             self.stop_connecting_animation()
         else:
+            # Если не подключен - подключаемся
             server_type = self.server_var.get()
             self.is_connecting = True
             self.start_connecting_animation()
@@ -841,6 +950,35 @@ class App(ctk.CTk):
                 self.status_indicator.configure(text_color="#888888")
                 self.status_text.configure(text="Не подключено")
 
+    def force_regenerate_config(self):
+        """Принудительная перегенерация текущего конфига"""
+        if not self.current_user:
+            messagebox.showerror("Ошибка", "Сначала выполните вход")
+            return
+
+        if not self.vpn.current_vpn_type:
+            messagebox.showwarning("Внимание", "Сначала выберите сервер и попробуйте подключиться")
+            return
+
+        answer = messagebox.askyesno(
+            "Подтверждение",
+            f"Перегенерировать конфиг для сервера '{'Россия' if self.vpn.current_vpn_type == 'ru' else 'Нидерланды'}'?\n\n"
+            "Это может занять несколько секунд."
+        )
+
+        if answer:
+            self.add_log("🔄 Запущена принудительная перегенерация конфига...")
+            success = self.vpn.regenerate_config(
+                self.vpn.current_vpn_type,
+                self.current_user["login"],
+                self.current_password
+            )
+
+            if success:
+                messagebox.showinfo("Успех", "Конфиг успешно перегенерирован!\nПопробуйте подключиться снова.")
+            else:
+                messagebox.showerror("Ошибка", "Не удалось перегенерировать конфиг")
+
     def check_vpn_status(self):
         """Периодическая проверка статуса VPN"""
         if not self.current_user:
@@ -858,14 +996,6 @@ class App(ctk.CTk):
     def add_log(self, msg):
         """Вывод лога в терминал"""
         print(msg)
-
-    def change_theme(self):
-        """Смена темы приложения (старый метод)"""
-        new_theme = self.theme_var.get()
-        if new_theme != self.current_theme:
-            self.current_theme = new_theme
-            self.setup_theme()
-            self.update_theme_colors()
 
     def show_rolling_credits(self):
         """Показать анимированные титры"""
@@ -933,6 +1063,7 @@ class App(ctk.CTk):
 
         self.destroy()
         sys.exit(0)
+
     def get_credentials_path(self):
         config_dir = Path.home() / ".config" / "kvanet"
         config_dir.mkdir(parents=True, exist_ok=True)
