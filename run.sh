@@ -37,7 +37,10 @@ else
     echo "⚠️ Файл requirements.txt не найден. Устанавливаем базовые пакеты вручную..."
     pip install customtkinter Pillow requests psutil
 fi
-
+pip install customtkinter
+pip install pillow
+pip install requests
+pip install psutil
 # 4. Деактивируем окружение (оно больше не нужно в текущей оболочке)
 deactivate
 
