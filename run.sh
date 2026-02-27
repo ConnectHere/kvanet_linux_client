@@ -1,7 +1,7 @@
 #!/bin/bash
 # 🚀 Kvanet VPN Client Launcher
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/src" && pwd)"
 cd "$SCRIPT_DIR"
 
 APP_NAME="Kvanet VPN Client"
@@ -21,4 +21,4 @@ if [ ! -d "venv" ]; then
 fi
 
 echo "🔐 Запуск ${APP_NAME}..."
-pkexec env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c "cd '$SCRIPT_DIR' && ./venv/bin/python3 kvanet_vpn.py"
+pkexec env DISPLAY="$DISPLAY" XAUTHORITY="$XAUTHORITY" bash -c "cd '$SCRIPT_DIR' && ../venv/bin/python3 kvanet_vpn.py"

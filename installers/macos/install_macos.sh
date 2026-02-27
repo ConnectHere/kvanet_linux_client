@@ -17,14 +17,20 @@ brew install openvpn
 
 # Копирование бинарника
 echo "📋 Копирование исполняемого файла..."
-cp dist/kvanet-vpn /usr/local/bin/kvanet-vpn
+mkdir -p /usr/local/bin
+cp ../../dist/kvanet-vpn /usr/local/bin/kvanet-vpn
 chmod 755 /usr/local/bin/kvanet-vpn
+
+# Создание симлинка для openvpn
+if [ ! -f /usr/local/bin/openvpn ]; then
+    ln -sf "$(brew --prefix openvpn)/sbin/openvpn" /usr/local/bin/openvpn
+fi
 
 # Создание .app пакета
 APP_DIR="/Applications/KvanetVPN.app/Contents/MacOS"
 mkdir -p "$APP_DIR"
 
-cat > "$APP_DIR/KvanetVPN" <<EOF
+cat > "$APP_DIR/KvanetVPN" <<'EOF'
 #!/bin/bash
 # Запрос прав администратора через AppleScript
 osascript -e 'do shell script "/usr/local/bin/kvanet-vpn" with administrator privileges'
@@ -32,6 +38,7 @@ EOF
 chmod +x "$APP_DIR/KvanetVPN"
 
 # Info.plist
+mkdir -p "/Applications/KvanetVPN.app/Contents"
 cat > "/Applications/KvanetVPN.app/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -53,16 +60,10 @@ cat > "/Applications/KvanetVPN.app/Contents/Info.plist" <<EOF
 </plist>
 EOF
 
-# Иконка (опционально)
-if [ -f "icon.icns" ]; then
+# Иконка
+if [ -f "../../resources/icons/icon.icns" ]; then
     mkdir -p "/Applications/KvanetVPN.app/Contents/Resources"
-    cp icon.icns "/Applications/KvanetVPN.app/Contents/Resources/"
-fi
-
-# Добавляем OpenVPN в PATH для запуска через скрипт
-# Можно также создать симлинк
-if [ ! -f /usr/local/bin/openvpn ]; then
-    ln -s "$(brew --prefix openvpn)/sbin/openvpn" /usr/local/bin/openvpn
+    cp ../../resources/icons/icon.icns "/Applications/KvanetVPN.app/Contents/Resources/"
 fi
 
 echo "✅ Установка завершена! Приложение в папке /Applications."
