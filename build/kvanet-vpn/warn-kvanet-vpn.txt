@@ -14,9 +14,9 @@ Types of import:
 IMPORTANT: Do NOT post this list to the issue-tracker. Use it as a basis for
             tracking down the missing module yourself. Thanks!
 
-missing module named _winapi - imported by shutil (conditional), ntpath (optional), pathlib._os (optional), mimetypes (optional), subprocess (conditional), sysconfig (delayed), multiprocessing.connection (optional), multiprocessing.spawn (delayed, conditional), multiprocessing.reduction (conditional), multiprocessing.shared_memory (conditional), multiprocessing.heap (conditional), multiprocessing.popen_spawn_win32 (top-level), asyncio.windows_events (top-level), asyncio.windows_utils (top-level)
+missing module named _winapi - imported by shutil (conditional), pathlib._os (optional), mimetypes (optional), subprocess (conditional), ntpath (optional), sysconfig (delayed), multiprocessing.connection (optional), multiprocessing.spawn (delayed, conditional), multiprocessing.reduction (conditional), multiprocessing.shared_memory (conditional), multiprocessing.heap (conditional), multiprocessing.popen_spawn_win32 (top-level), asyncio.windows_events (top-level), asyncio.windows_utils (top-level)
 missing module named msvcrt - imported by subprocess (optional), multiprocessing.spawn (delayed, conditional), multiprocessing.popen_spawn_win32 (top-level), asyncio.windows_events (top-level), asyncio.windows_utils (top-level)
-missing module named nt - imported by _colorize (delayed, conditional, optional), shutil (conditional), importlib._bootstrap_external (conditional), ntpath (optional), os (delayed, conditional, optional), ctypes (delayed, conditional), _pyrepl.windows_console (optional)
+missing module named nt - imported by _colorize (delayed, conditional, optional), shutil (conditional), importlib._bootstrap_external (conditional), os (delayed, conditional, optional), ntpath (optional), ctypes (delayed, conditional), _pyrepl.windows_console (optional)
 missing module named winreg - imported by importlib._bootstrap_external (conditional), mimetypes (optional), urllib.request (delayed, conditional, optional), platform (delayed, optional), darkdetect._windows_detect (top-level), requests.utils (delayed, conditional, optional), setuptools._distutils.compilers.C.msvc (top-level), setuptools.msvc (conditional)
 missing module named _frozen_importlib_external - imported by importlib._bootstrap (delayed), importlib (optional), importlib.abc (optional), zipimport (top-level)
 excluded module named _frozen_importlib - imported by importlib (optional), importlib.abc (optional), zipimport (top-level)
@@ -32,10 +32,6 @@ missing module named pyimod02_importers - imported by /home/mi/kvanet_linux_clie
 missing module named typing_extensions - imported by packaging.version (conditional), customtkinter.windows.widgets.font.ctk_font (optional), customtkinter.windows.widgets.scaling.scaling_base_class (optional), customtkinter.windows.widgets.core_widget_classes.ctk_base_class (optional), customtkinter.windows.widgets.ctk_progressbar (optional), customtkinter.windows.widgets.ctk_segmented_button (optional), customtkinter.windows.widgets.ctk_scrollable_frame (optional), setuptools._distutils.util (conditional), setuptools._distutils.compilers.C.base (conditional), setuptools._distutils.sysconfig (conditional), setuptools._reqs (conditional), setuptools.warnings (conditional), setuptools._path (conditional), setuptools._distutils.dist (conditional), setuptools._distutils.cmd (conditional), setuptools._distutils.command.bdist (conditional), setuptools.config.expand (conditional), setuptools.config.setupcfg (conditional), setuptools.config._apply_pyprojecttoml (conditional), setuptools.config.pyprojecttoml (conditional), setuptools.config._validate_pyproject.formats (conditional), setuptools._vendor.packaging.version (conditional), setuptools.config._validate_pyproject.error_reporting (conditional), setuptools.dist (conditional), setuptools.command.bdist_egg (conditional), setuptools.compat.py311 (conditional), urllib3.util.retry (conditional), urllib3._collections (conditional), urllib3.util.ssltransport (conditional), urllib3.connectionpool (conditional), urllib3.poolmanager (conditional), urllib3.contrib.emscripten.fetch (conditional), charset_normalizer.legacy (conditional), setuptools.msvc (conditional)
 missing module named _overlapped - imported by asyncio.windows_events (top-level)
 missing module named _typeshed - imported by setuptools._distutils.dist (conditional), setuptools.command.bdist_egg (conditional), setuptools.glob (conditional), setuptools._vendor.wheel.wheelfile (conditional), setuptools.compat.py311 (conditional)
-missing module named vms_lib - imported by platform (delayed, optional)
-missing module named 'java.lang' - imported by platform (delayed, optional)
-missing module named java - imported by platform (delayed)
-missing module named _wmi - imported by platform (optional)
 missing module named usercustomize - imported by site (delayed, optional)
 missing module named sitecustomize - imported by site (delayed, optional)
 missing module named _manylinux - imported by packaging._manylinux (delayed, optional), setuptools._vendor.packaging._manylinux (delayed, optional)
@@ -45,6 +41,10 @@ missing module named trove_classifiers - imported by setuptools.config._validate
 missing module named PyObjCTools - imported by darkdetect._mac_detect (optional)
 missing module named Foundation - imported by darkdetect._mac_detect (optional)
 missing module named numpy - imported by PIL._typing (conditional, optional)
+missing module named vms_lib - imported by platform (delayed, optional)
+missing module named 'java.lang' - imported by platform (delayed, optional)
+missing module named java - imported by platform (delayed)
+missing module named _wmi - imported by platform (optional)
 missing module named 'OpenSSL.crypto' - imported by urllib3.contrib.pyopenssl (delayed, conditional)
 missing module named 'cryptography.x509' - imported by urllib3.contrib.pyopenssl (delayed, optional)
 missing module named cryptography - imported by urllib3.contrib.pyopenssl (top-level), requests (conditional, optional)
