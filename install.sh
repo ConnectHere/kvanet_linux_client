@@ -1,115 +1,99 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -e
 
-APP_NAME="kvanet-vpn"
-INSTALL_DIR="/opt/kvanet-vpn"
-DESKTOP_SYSTEM="/usr/share/applications/kvanet-vpn.desktop"
+# Цвета для вывода
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-echo "=== Kvanet VPN installer ==="
+echo -e "${GREEN}========================================${NC}"
+echo -e "${GREEN} Установка Kvanet VPN Client${NC}"
+echo -e "${GREEN}========================================${NC}"
 
-# ------------------ ROOT CHECK ------------------
+# Проверка root
 if [ "$EUID" -ne 0 ]; then
-  echo "Запусти установку через sudo:"
-  echo "sudo ./install.sh"
-  exit 1
+    echo -e "${RED}❌ Пожалуйста, запустите с sudo или от root${NC}"
+    exit 1
 fi
 
-# ------------------ DETECT DISTRO ------------------
-echo "[1/6] Определение дистрибутива..."
-
-if command -v pacman >/dev/null 2>&1; then
-  PM="pacman"
-elif command -v apt >/dev/null 2>&1; then
-  PM="apt"
-elif command -v dnf >/dev/null 2>&1; then
-  PM="dnf"
+# Определение дистрибутива
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+    OS=$ID
 else
-  echo "❌ Неподдерживаемый дистрибутив"
-  exit 1
+    echo -e "${RED}Не удалось определить ОС${NC}"
+    exit 1
 fi
 
-# ------------------ INSTALL SYSTEM DEPENDENCIES ------------------
-echo "[2/6] Установка системных зависимостей..."
-
-case "$PM" in
-  pacman)
-    pacman -Sy --noconfirm \
-      python \
-      python-virtualenv \
-      openvpn \
-      polkit \
-      xdg-utils
-    ;;
-  apt)
-    apt update
-    apt install -y \
-      python3 \
-      python3-venv \
-      python3-pip \
-      openvpn \
-      policykit-1 \
-      xdg-utils
-    ;;
-  dnf)
-    dnf install -y \
-      python3 \
-      python3-virtualenv \
-      openvpn \
-      polkit \
-      xdg-utils
-    ;;
+# Установка системных зависимостей
+echo -e "${YELLOW}📦 Установка OpenVPN и V2Ray...${NC}"
+case $OS in
+    ubuntu|debian)
+        apt update
+        apt install -y openvpn v2ray
+        ;;
+    fedora|centos|rhel)
+        dnf install -y openvpn v2ray
+        ;;
+    arch)
+        pacman -S --noconfirm openvpn v2ray
+        ;;
+    *)
+        echo -e "${RED}❌ Неподдерживаемый дистрибутив. Установите OpenVPN и V2Ray вручную.${NC}"
+        exit 1
+        ;;
 esac
 
-# ------------------ INSTALL APP FILES ------------------
-echo "[3/6] Установка файлов приложения..."
+# Копирование бинарника
+echo -e "${YELLOW}📋 Копирование исполняемого файла...${NC}"
+cp dist/kvanet-vpn /usr/local/bin/kvanet-vpn
+chmod 755 /usr/local/bin/kvanet-vpn
 
-mkdir -p "$INSTALL_DIR"
-cp full.py "$INSTALL_DIR/"
-cp icon.png "$INSTALL_DIR/"
-cp titry.mp4 "$INSTALL_DIR/"
-cp run_vpn.sh "$INSTALL_DIR/"
-
-chmod 755 "$INSTALL_DIR/full.py"
-chmod 755 "$INSTALL_DIR/run_vpn.sh"
-
-# ------------------ CREATE VENV ------------------
-echo "[4/6] Создание Python virtualenv..."
-
-cd "$INSTALL_DIR"
-python3 -m venv venv
-
-"$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-"$INSTALL_DIR/venv/bin/pip" install \
-  customtkinter \
-  pillow \
-  requests \
-  psutil
-
-# ------------------ CREATE DESKTOP ENTRY ------------------
-echo "[5/6] Создание .desktop файла..."
-
-cat > "$DESKTOP_SYSTEM" <<EOF
+# Создание .desktop файла
+echo -e "${YELLOW}🖥️ Создание ярлыка в меню...${NC}"
+cat > /usr/share/applications/kvanet-vpn.desktop <<EOF
 [Desktop Entry]
-Name=Kvanet VPN
-Comment=VPN клиент Kvanet
-Exec= $INSTALL_DIR/run_vpn.sh
-Icon=$INSTALL_DIR/icon.png
-Terminal=false
+Version=1.0
 Type=Application
-Categories=Network;Security;
-StartupNotify=true
+Name=Kvanet VPN
+Comment=Kvanet VPN Client
+Exec=pkexec env DISPLAY=\$DISPLAY XAUTHORITY=\$XAUTHORITY /usr/local/bin/kvanet-vpn
+Icon=/usr/local/share/kvanet-vpn/icon.png
+Terminal=false
+Categories=Network;
 EOF
 
-chmod 644 "$DESKTOP_SYSTEM"
-
-# ------------------ UPDATE DESKTOP DATABASE ------------------
-echo "[6/6] Обновление базы приложений..."
-
-if command -v update-desktop-database >/dev/null 2>&1; then
-  update-desktop-database /usr/share/applications || true
+# Создание иконки (если есть файл icon.png)
+mkdir -p /usr/local/share/kvanet-vpn
+if [ -f "icon.png" ]; then
+    cp icon.png /usr/local/share/kvanet-vpn/
+else
+    # Скачать дефолтную иконку или использовать системную
+    echo -e "${YELLOW}⚠️  Файл icon.png не найден, ярлык будет без иконки${NC}"
 fi
 
-echo
-echo "✅ Установка завершена"
-echo "✅ Приложение доступно в меню приложений"
-echo "✅ Root-пароль запрашивается через GUI"
+# Настройка pkexec для беспарольного запуска (опционально)
+echo -e "${YELLOW}🔐 Настройка прав для pkexec...${NC}"
+cat > /usr/share/polkit-1/actions/org.kvanet.vpn.policy <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<policyconfig>
+  <action id="org.kvanet.vpn.run">
+    <description>Run Kvanet VPN Client</description>
+    <message>Authentication is required to run Kvanet VPN Client</message>
+    <defaults>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/local/bin/kvanet-vpn</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+</policyconfig>
+EOF
+
+echo -e "${GREEN}✅ Установка завершена!${NC}"
+echo -e "${GREEN}Запустить можно из меню приложений или командой: pkexec kvanet-vpn${NC}"
